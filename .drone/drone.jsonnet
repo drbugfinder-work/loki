@@ -3,29 +3,26 @@ local archs = ['amd64', 'arm64', 'arm'];
 
 local build_image_version = std.extVar('__build-image-version');
 
-local condition(verb) = {
-  tagMain: {
-    ref: {
-      [verb]:
-        [
-          'refs/heads/main',
-          'refs/heads/k???',
-          'refs/tags/v*',
-        ],
-    },
-  },
-  path(path): {
-    paths: {
-      [verb]: [path],
-    },
-  },
+local onPRs = {
+  event: ['pull_request'],
+};
+
+local onTagOrMain = {
+  event: ['push', 'tag'],
+};
+
+local onPath(path) = {
+  paths+: [path],
 };
 
 local pipeline(name) = {
   kind: 'pipeline',
   name: name,
   steps: [],
-  trigger: { event: ['push', 'pull_request', 'tag'] },
+  trigger: {
+    // Only trigger pipelines for PRs, tags (v*), or pushes to "main". Excluding runs on grafana/loki (non fork) branches
+    ref: ['refs/heads/main', 'refs/heads/k???', 'refs/tags/v*', 'refs/pull/*/head'],
+  },
 };
 
 local secret(name, vault_path, vault_key) = {
@@ -42,9 +39,11 @@ local ecr_key = secret('ecr_key', 'infra/data/ci/loki/aws-credentials', 'access_
 local ecr_secret_key = secret('ecr_secret_key', 'infra/data/ci/loki/aws-credentials', 'secret_access_key');
 local pull_secret = secret('dockerconfigjson', 'secret/data/common/gcr', '.dockerconfigjson');
 local github_secret = secret('github_token', 'infra/data/ci/github/grafanabot', 'pat');
+local gpg_passphrase = secret('gpg_passphrase', 'infra/data/ci/packages-publish/gpg', 'passphrase');
+local gpg_private_key = secret('gpg_private_key', 'infra/data/ci/packages-publish/gpg', 'private-key');
 
 // Injected in a secret because this is a public repository and having the config here would leak our environment names
-local deploy_configuration = secret('deploy_config', 'secret/data/common/loki_ci_autodeploy', 'config.json');
+local updater_config_template = secret('updater_config_template', 'secret/data/common/loki_ci_autodeploy', 'updater-config-template.json');
 
 local run(name, commands, env={}) = {
   name: name,
@@ -145,7 +144,7 @@ local querytee() = pipeline('querytee-amd64') + arch_image('amd64', 'main') {
     // dry run for everything that is not tag or main
     docker('amd64', 'querytee') {
       depends_on: ['image-tag'],
-      when: condition('exclude').tagMain,
+      when: onPRs,
       settings+: {
         dry_run: true,
         repo: 'grafana/loki-query-tee',
@@ -155,7 +154,7 @@ local querytee() = pipeline('querytee-amd64') + arch_image('amd64', 'main') {
     // publish for tag or main
     docker('amd64', 'querytee') {
       depends_on: ['image-tag'],
-      when: condition('include').tagMain,
+      when: onTagOrMain,
       settings+: {
         repo: 'grafana/loki-query-tee',
       },
@@ -169,7 +168,7 @@ local fluentbit() = pipeline('fluent-bit-amd64') + arch_image('amd64', 'main') {
     // dry run for everything that is not tag or main
     clients_docker('amd64', 'fluent-bit') {
       depends_on: ['image-tag'],
-      when: condition('exclude').tagMain,
+      when: onPRs,
       settings+: {
         dry_run: true,
         repo: 'grafana/fluent-bit-plugin-loki',
@@ -179,7 +178,7 @@ local fluentbit() = pipeline('fluent-bit-amd64') + arch_image('amd64', 'main') {
     // publish for tag or main
     clients_docker('amd64', 'fluent-bit') {
       depends_on: ['image-tag'],
-      when: condition('include').tagMain,
+      when: onTagOrMain,
       settings+: {
         repo: 'grafana/fluent-bit-plugin-loki',
       },
@@ -193,7 +192,7 @@ local fluentd() = pipeline('fluentd-amd64') + arch_image('amd64', 'main') {
     // dry run for everything that is not tag or main
     clients_docker('amd64', 'fluentd') {
       depends_on: ['image-tag'],
-      when: condition('exclude').tagMain,
+      when: onPRs,
       settings+: {
         dry_run: true,
         repo: 'grafana/fluent-plugin-loki',
@@ -203,7 +202,7 @@ local fluentd() = pipeline('fluentd-amd64') + arch_image('amd64', 'main') {
     // publish for tag or main
     clients_docker('amd64', 'fluentd') {
       depends_on: ['image-tag'],
-      when: condition('include').tagMain,
+      when: onTagOrMain,
       settings+: {
         repo: 'grafana/fluent-plugin-loki',
       },
@@ -217,7 +216,7 @@ local logstash() = pipeline('logstash-amd64') + arch_image('amd64', 'main') {
     // dry run for everything that is not tag or main
     clients_docker('amd64', 'logstash') {
       depends_on: ['image-tag'],
-      when: condition('exclude').tagMain,
+      when: onPRs,
       settings+: {
         dry_run: true,
         repo: 'grafana/logstash-output-loki',
@@ -227,7 +226,7 @@ local logstash() = pipeline('logstash-amd64') + arch_image('amd64', 'main') {
     // publish for tag or main
     clients_docker('amd64', 'logstash') {
       depends_on: ['image-tag'],
-      when: condition('include').tagMain,
+      when: onTagOrMain,
       settings+: {
         repo: 'grafana/logstash-output-loki',
       },
@@ -241,7 +240,7 @@ local promtail(arch) = pipeline('promtail-' + arch) + arch_image(arch) {
     // dry run for everything that is not tag or main
     clients_docker(arch, 'promtail') {
       depends_on: ['image-tag'],
-      when: condition('exclude').tagMain,
+      when: onPRs,
       settings+: {
         dry_run: true,
       },
@@ -250,27 +249,19 @@ local promtail(arch) = pipeline('promtail-' + arch) + arch_image(arch) {
     // publish for tag or main
     clients_docker(arch, 'promtail') {
       depends_on: ['image-tag'],
-      when: condition('include').tagMain,
+      when: onTagOrMain,
       settings+: {},
     },
   ],
   depends_on: ['check'],
 };
 
-local lambda_promtail(tags='') = pipeline('lambda-promtail') {
+local lambda_promtail(arch) = pipeline('lambda-promtail-' + arch) + arch_image(arch) {
   steps+: [
-    {
-      name: 'image-tag',
-      image: 'alpine',
-      commands: [
-        'apk add --no-cache bash git',
-        'git fetch origin --tags',
-        'echo $(./tools/image-tag)-amd64 > .tags',
-      ] + if tags != '' then ['echo ",%s" >> .tags' % tags] else [],
-    },
+    // dry run for everything that is not tag or main
     lambda_promtail_ecr('lambda-promtail') {
       depends_on: ['image-tag'],
-      when: condition('exclude').tagMain,
+      when: onPRs,
       settings+: {
         dry_run: true,
       },
@@ -279,19 +270,44 @@ local lambda_promtail(tags='') = pipeline('lambda-promtail') {
     // publish for tag or main
     lambda_promtail_ecr('lambda-promtail') {
       depends_on: ['image-tag'],
-      when: condition('include').tagMain,
+      when: onTagOrMain,
       settings+: {},
     },
   ],
   depends_on: ['check'],
 };
 
+local logql_analyzer() = pipeline('logql-analyzer') + arch_image('amd64') {
+  steps+: [
+    // dry run for everything that is not tag or main
+    docker('amd64', 'logql-analyzer') {
+      depends_on: ['image-tag'],
+      when: onPRs,
+      settings+: {
+        dry_run: true,
+        repo: 'grafana/logql-analyzer',
+      },
+    },
+  ] + [
+    // publish for tag or main
+    docker('amd64', 'logql-analyzer') {
+      depends_on: ['image-tag'],
+      when: onTagOrMain,
+      settings+: {
+        repo: 'grafana/logql-analyzer',
+      },
+    },
+  ],
+  depends_on: ['check'],
+};
+
+
 local multiarch_image(arch) = pipeline('docker-' + arch) + arch_image(arch) {
   steps+: [
     // dry run for everything that is not tag or main
     docker(arch, app) {
       depends_on: ['image-tag'],
-      when: condition('exclude').tagMain,
+      when: onPRs,
       settings+: {
         dry_run: true,
       },
@@ -301,7 +317,7 @@ local multiarch_image(arch) = pipeline('docker-' + arch) + arch_image(arch) {
     // publish for tag or main
     docker(arch, app) {
       depends_on: ['image-tag'],
-      when: condition('include').tagMain,
+      when: onTagOrMain,
       settings+: {},
     }
     for app in apps
@@ -352,7 +368,7 @@ local manifest(apps) = pipeline('manifest') {
       {
         name: 'push-image',
         image: 'plugins/docker',
-        when: condition('include').tagMain + condition('include').path('loki-build-image/**'),
+        when: onTagOrMain + onPath('loki-build-image/**'),
         settings: {
           repo: 'grafana/loki-build-image',
           context: 'loki-build-image',
@@ -454,40 +470,65 @@ local manifest(apps) = pipeline('manifest') {
   querytee(),
 ] + [
   manifest(['promtail', 'loki', 'loki-canary']) {
-    trigger: condition('include').tagMain {
-      event: ['push', 'tag'],
-    },
+    trigger+: onTagOrMain,
   },
 ] + [
   pipeline('deploy') {
-    trigger: condition('include').tagMain {
-      event: ['push', 'tag'],
-    },
+    local configFileName = 'updater-config.json',
+    trigger+: onTagOrMain,
     depends_on: ['manifest'],
     image_pull_secrets: [pull_secret.name],
     steps: [
       {
-        name: 'image-tag',
+        name: 'prepare-updater-config',
         image: 'alpine',
+        environment: {
+          RELEASE_BRANCH_REGEXP: '^release-([0-9\\.x]+)$',
+        },
         commands: [
           'apk add --no-cache bash git',
           'git fetch origin --tags',
+          'echo $(./tools/image-tag)',
           'echo $(./tools/image-tag) > .tag',
+          // if the branch name matches the pattern `release-D.D.x` then RELEASE_NAME="D-D-x", otherwise RELEASE_NAME="next"
+          'export RELEASE_NAME=$([[ $DRONE_SOURCE_BRANCH =~ $RELEASE_BRANCH_REGEXP ]] && echo $DRONE_SOURCE_BRANCH | grep -oE "([0-9\\.x]+)" | sed "s/\\./-/g" || echo "next")',
+          'echo $RELEASE_NAME',
+          'export RELEASE_TAG=$(cat .tag) && echo $RELEASE_TAG',
+          'echo $PLUGIN_CONFIG_TEMPLATE > %s' % configFileName,
+          // replace placeholders with RELEASE_NAME and RELEASE TAG
+          'sed -i "s/\\"{{release}}\\"/\\"$RELEASE_NAME\\"/g" %s' % configFileName,
+          'sed -i "s/{{version}}/$RELEASE_TAG/g" %s' % configFileName,
         ],
+        settings: {
+          config_template: { from_secret: updater_config_template.name },
+        },
         depends_on: ['clone'],
       },
       {
         name: 'trigger',
-        image: 'us.gcr.io/kubernetes-dev/drone/plugins/deploy-image',
+        image: 'us.gcr.io/kubernetes-dev/drone/plugins/updater',
         settings: {
           github_token: { from_secret: github_secret.name },
-          images_json: { from_secret: deploy_configuration.name },
-          docker_tag_file: '.tag',
+          config_file: configFileName,
         },
-        depends_on: ['clone', 'image-tag'],
+        depends_on: ['prepare-updater-config'],
       },
     ],
   },
-] + [promtail_win()]
-+ [lambda_promtail('main')]
-+ [github_secret, pull_secret, docker_username_secret, docker_password_secret, ecr_key, ecr_secret_key, deploy_configuration]
+  promtail_win(),
+  logql_analyzer(),
+]
++ [
+  lambda_promtail(arch)
+  for arch in ['amd64', 'arm64']
+] + [
+  github_secret,
+  pull_secret,
+  docker_username_secret,
+  docker_password_secret,
+  ecr_key,
+  ecr_secret_key,
+  updater_config_template,
+  gpg_passphrase,
+  gpg_private_key,
+]
